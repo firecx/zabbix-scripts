@@ -1,0 +1,46 @@
+Requires -RunAsAdministrator
+# Находит диски Seagate и выводит число ошибок Raw_Read_Error_Rate (атрибут 1).
+# У Seagate RAW 48-битный: старшие 16 бит = ошибки, младшие 32 = число операций.
+# Работает без сторонних программ, через WMI (SMART-данные драйвера Windows).
+# Запуск: PowerShell от имени администратора -> .\seagate_read_errors.ps1
+
+$smart = Get-CimInstance -Namespace root\wmi -ClassName MSStorageDriver_FailurePredictData -ErrorAction SilentlyContinue
+
+$disks = Get-CimInstance Win32_DiskDrive | Where-Object { $_.Model -match '^ST|Seagate' }
+
+if (-not $disks) {
+    Write-Host "Диски Seagate не найдены"
+    exit 1
+}
+
+foreach ($d in $disks) {
+    $model = $d.Model.Trim()
+
+    # InstanceName в WMI = PNPDeviceID диска + "_0"
+    $s = $smart | Where-Object {
+        $_.InstanceName.StartsWith($d.PNPDeviceID, [StringComparison]::OrdinalIgnoreCase)
+    } | Select-Object -First 1
+
+    if (-not $s) {
+        "{0} ({1}): SMART недоступен" -f $d.DeviceID, $model
+        continue
+    }
+
+    # VendorSpecific: 2 байта заголовка, затем записи по 12 байт:
+    # [0]=ID, [1-2]=флаги, [3]=value, [4]=worst, [5-10]=RAW (little-endian), [11]=резерв
+    $b = $s.VendorSpecific
+    $errs = $null
+    for ($i = 2; $i + 11 -lt $b.Length; $i += 12) {
+        if ($b[$i] -eq 1) {
+            # старшие 16 бит RAW = байты RAW[4] и RAW[5]
+            $errs = [int]$b[$i + 9] + 256 * [int]$b[$i + 10]
+            break
+        }
+    }
+
+    if ($null -ne $errs) {
+        "{0} ({1}): {2}" -f $d.DeviceID, $model, $errs
+    } else {
+        "{0} ({1}): атрибут 1 недоступен" -f $d.DeviceID, $model
+    }
+}
