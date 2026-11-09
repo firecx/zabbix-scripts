@@ -1,0 +1,46 @@
+/usr/bin/env bash
+# Находит диски Seagate и выводит число ошибок Raw_Read_Error_Rate (атрибут 1).
+# У Seagate RAW 48-битный: старшие 16 бит = ошибки, младшие 32 = число операций.
+# Запуск: sudo ./seagate_read_errors.sh
+
+set -u
+
+if [[ $EUID -ne 0 ]]; then
+    echo "Запустите от root: sudo $0" >&2
+    exit 1
+fi
+
+if ! command -v smartctl >/dev/null 2>&1; then
+    echo "smartctl не найден, установите пакет smartmontools" >&2
+    exit 1
+fi
+
+found=0
+
+# Строки вида: /dev/sda -d sat # /dev/sda [SAT], ATA device
+while read -r dev _ dtype _; do
+    [[ -z ${dev:-} || $dev == \#* ]] && continue
+
+    info=$(smartctl -i -d "$dtype" "$dev" 2>/dev/null)
+
+    model=$(awk -F: '/^(Device Model|Model Number|Product):/ {
+                sub(/^[ \t]+/, "", $2); print $2; exit }' <<< "$info")
+
+    # Seagate: модель начинается с ST или в информации есть "Seagate"
+    if [[ $model =~ ^ST ]] || grep -qi 'seagate' <<< "$info"; then
+        found=1
+        errs=$(smartctl -A -d "$dtype" -v 1,raw48:54 "$dev" 2>/dev/null |
+               awk '$1 == 1 { print $10; exit }')
+
+        if [[ -n $errs ]]; then
+            echo "$dev ($model): $errs"
+        else
+            echo "$dev ($model): атрибут 1 недоступен"
+        fi
+    fi
+done < <(smartctl --scan)
+
+if [[ $found -eq 0 ]]; then
+    echo "Диски Seagate не найдены"
+    exit 1
+fi
